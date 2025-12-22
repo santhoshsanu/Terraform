@@ -1,72 +1,4 @@
 ############################################
-# main.tf — Minimal EKS + Node Group (CUSTOM AMI)
-# Fixed multi-arg single-line blocks
-############################################
-
-terraform {
-
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
-  }
-}
-
-############################################
-# Variables
-############################################
-variable "region" {
-  type    = string
-  default = "us-east-1"
-}
-
-variable "cluster_name" {
-  type    = string
-  default = "eks-custom-ami-demo"
-}
-
-variable "custom_ami_id" {
-  type        = string
-  description = "Custom AMI ID for nodes (must contain EKS bootstrap or equivalent)"
-  default     = "ami-0e2635e5701f88a12" # <-- replace with your AMI, e.g. ami-0abc123...
-  validation {
-    condition     = var.custom_ami_id != "<ID>"
-    error_message = "Set var.custom_ami_id to a real AMI ID (e.g., ami-xxxxxxxx)."
-  }
-}
-
-variable "instance_types" {
-  type    = list(string)
-  default = ["t3.medium"]
-}
-
-variable "desired_size" {
-  type    = number
-  default = 2
-}
-
-variable "min_size" {
-  type    = number
-  default = 1
-}
-
-variable "max_size" {
-  type    = number
-  default = 3
-}
-
-variable "vpc_cidr" {
-  type        = string
-  description = "VPC CIDR"
-  default     = "10.100.0.0/16"
-}
-
-provider "aws" {
-  region = var.region
-}
-
-############################################
 # VPC (simple: 2 public subnets)
 ############################################
 data "aws_availability_zones" "azs" {
@@ -136,19 +68,22 @@ resource "aws_route_table_association" "b" {
   route_table_id = aws_route_table.public.id
 }
 
-
 ############################################
-# Security Groups (no cross-refs inside)
+# Security Groups
 ############################################
 
-# Cluster SG (for control plane ENIs)
+############################
+# EKS Cluster Security Group
+############################
 resource "aws_security_group" "cluster" {
   name        = "${var.cluster_name}-cluster-sg"
+  description = "EKS cluster security group"
   vpc_id      = aws_vpc.vpc.id
-  description = "EKS cluster SG"
 
-  # no ingress here — added via aws_security_group_rule below
+  # ❌ No ingress required
+  # AWS manages control plane access internally
 
+  # ✅ Allow cluster to reach nodes, AWS services, etc.
   egress {
     from_port   = 0
     to_port     = 0
@@ -156,26 +91,29 @@ resource "aws_security_group" "cluster" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.cluster_name}-cluster-sg" }
+  tags = {
+    Name = "${var.cluster_name}-cluster-sg"
+  }
 }
 
-# Node SG
+############################
+# EKS Node Security Group
+############################
 resource "aws_security_group" "nodes" {
   name        = "${var.cluster_name}-nodes-sg"
+  description = "EKS worker nodes security group"
   vpc_id      = aws_vpc.vpc.id
-  description = "EKS nodes SG"
 
-  # node-to-node
+  # ✅ Node-to-node communication (pods, kube-proxy, CNI)
   ingress {
-    description = "Node-to-node"
+    description = "Node to node all traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     self        = true
   }
 
-  # no cluster->nodes ingress here — added via aws_security_group_rule below
-
+  # ✅ Nodes need outbound access
   egress {
     from_port   = 0
     to_port     = 0
@@ -183,9 +121,54 @@ resource "aws_security_group" "nodes" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "${var.cluster_name}-nodes-sg" }
+  tags = {
+    Name = "${var.cluster_name}-nodes-sg"
+  }
 }
 
+############################################
+# Security Group Rules (EXPLICIT & CORRECT)
+############################################
+
+############################################
+# Cluster → Nodes (MANDATORY)
+############################################
+
+# Control plane → kubelet (HTTPS)
+resource "aws_security_group_rule" "cluster_to_nodes_https" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.nodes.id
+  source_security_group_id = aws_security_group.cluster.id
+  description              = "EKS control plane to nodes (HTTPS)"
+}
+
+# Control plane → kubelet API
+resource "aws_security_group_rule" "cluster_to_nodes_kubelet" {
+  type                     = "ingress"
+  from_port                = 10250
+  to_port                  = 10250
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.nodes.id
+  source_security_group_id = aws_security_group.cluster.id
+  description              = "EKS control plane to kubelet"
+}
+
+
+############################################
+# Nodes → Cluster (CRITICAL – MISSING)
+############################################
+resource "aws_security_group_rule" "nodes_to_cluster_https" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.cluster.id
+  source_security_group_id = aws_security_group.nodes.id
+  description              = "Worker nodes to EKS control plane (HTTPS)"
+}
 
 
 
@@ -203,7 +186,7 @@ data "aws_iam_policy_document" "assume_cluster" {
 }
 
 resource "aws_iam_role" "cluster" {
-  name               = "${var.cluster_name}-cluster-role"
+  name               = "${var.cluster_name}-cluster"
   assume_role_policy = data.aws_iam_policy_document.assume_cluster.json
 }
 
@@ -247,6 +230,11 @@ resource "aws_iam_role_policy_attachment" "node_ecr_ro" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+resource "aws_iam_role_policy_attachment" "node_ssm" {
+  role       = aws_iam_role.nodes.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 ############################################
 # EKS Cluster
 ############################################
@@ -261,36 +249,47 @@ resource "aws_eks_cluster" "cluster" {
     endpoint_private_access = false
   }
 
-  # Optionally pin version:
-  # version = "1.30"
+  version = "1.32"
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster,
     aws_iam_role_policy_attachment.eks_service
   ]
 }
+############################################
+# Launch Template (AL2023 + Managed Node Group)
+############################################
 
-############################################
-# Launch Template (uses your custom AMI)
-############################################
 locals {
-  user_data_b64 = base64encode(<<-EOT
-    #!/bin/bash
-    set -xe
-    /etc/eks/bootstrap.sh ${var.cluster_name} \
-      --kubelet-extra-args "--node-labels=node.kubernetes.io/lifecycle=normal"
-  EOT
-  )
+  eks_node_user_data = <<-EOF
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUNDARY"
+
+--BOUNDARY
+Content-Type: application/node.eks.aws
+
+---
+apiVersion: node.eks.aws/v1alpha1
+kind: NodeConfig
+spec:
+  cluster:
+    name: ${aws_eks_cluster.cluster.name}
+    apiServerEndpoint: ${aws_eks_cluster.cluster.endpoint}
+    certificateAuthority: ${aws_eks_cluster.cluster.certificate_authority[0].data}
+    cidr: ${aws_eks_cluster.cluster.kubernetes_network_config[0].service_ipv4_cidr}
+
+--BOUNDARY--
+EOF
 }
 
 resource "aws_launch_template" "lt" {
   name_prefix = "${var.cluster_name}-lt-"
   image_id    = var.custom_ami_id
 
-
-
   vpc_security_group_ids = [aws_security_group.nodes.id]
-  user_data              = local.user_data_b64
+
+  # ✅ REQUIRED for AL2023 + CUSTOM AMI
+  user_data = base64encode(local.eks_node_user_data)
 
   tag_specifications {
     resource_type = "instance"
@@ -300,6 +299,8 @@ resource "aws_launch_template" "lt" {
     }
   }
 }
+
+
 
 ############################################
 # Managed Node Group (CUSTOM AMI)
