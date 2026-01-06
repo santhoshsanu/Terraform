@@ -15,6 +15,12 @@ module "eks" {
     "subnet-0fdc82872298f30c5"
   ]
 
+
+  enable_bootstrap_user_data = false
+  user_data_template_path   = null
+  ami_id                    = null
+
+
   eks_managed_node_groups = {
     general = {
       ami_type = "CUSTOM"
