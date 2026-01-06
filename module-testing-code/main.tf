@@ -5,8 +5,6 @@ module "eks" {
   # ✅ RENAMED in v21
   name               = "example"
   kubernetes_version = "1.32"
-
-  cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
 
   vpc_id = "vpc-02b6f225e8caca6df"
