@@ -2,8 +2,9 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 21.0"
 
-  cluster_name    = "example"
-  cluster_version = "1.32"
+  # ✅ RENAMED in v21
+  name               = "example"
+  kubernetes_version = "1.32"
 
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
@@ -16,30 +17,24 @@ module "eks" {
     "subnet-0fdc82872298f30c5"
   ]
 
-  # create_launch_template       = false
-  # use_custom_launch_template   = true
-
-  
-
-
   eks_managed_node_groups = {
     general = {
+      ami_type = "CUSTOM"
+
+      create_launch_template     = false
+      use_custom_launch_template = true
+
+      launch_template = {
+        id      = aws_launch_template.al2023_lt.id
+        version = "$Latest"
+      }
+
       min_size     = 1
       max_size     = 3
       desired_size = 2
 
       instance_types = ["t3.medium"]
       capacity_type  = "ON_DEMAND"
-
-      ami_type = "CUSTOM"
-      launch_template_id      = aws_launch_template.al2023_lt.id
-      launch_template_version = "$Latest"
-
-
-
-      labels = {
-        role = "general"
-      }
     }
   }
 
@@ -51,36 +46,13 @@ module "eks" {
 
 
 
-# locals {
-#   al2023_nodeadm_userdata = <<-EOF
-# MIME-Version: 1.0
-# Content-Type: multipart/mixed; boundary="BOUNDARY"
-
-# --BOUNDARY
-# Content-Type: application/node.eks.aws
-
-# ---
-# apiVersion: node.eks.aws/v1alpha1
-# kind: NodeConfig
-# spec:
-#   cluster:
-#     name: ${module.eks.cluster_name}
-#     apiServerEndpoint: ${module.eks.cluster_endpoint}
-#     certificateAuthority: ${module.eks.cluster_certificate_authority_data}
-
-# --BOUNDARY--
-# EOF
-# }
 
 
 resource "aws_launch_template" "al2023_lt" {
   name_prefix = "example-al2023-"
 
-  # ✅ EKS Optimized Amazon Linux 2023 (x86_64)
-
-  image_id = "ami-066040dcc14399931"
-
-  
+  image_id      = "ami-066040dcc14399931"
+  instance_type = "t3.medium"
 
   tag_specifications {
     resource_type = "instance"
